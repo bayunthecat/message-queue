@@ -7,6 +7,9 @@ import com.example.model.impl.AmazonSqsMessage;
 
 /**
  * {@link QueueService} that uses AmazonSQS as underlying store.
+ * <p>
+ *
+ * NOTE: I had no opportunity to test this solution since amazon account creation took much longer that expected.
  */
 public class SqsQueueService implements QueueService<AmazonSqsMessage> {
 

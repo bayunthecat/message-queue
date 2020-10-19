@@ -10,9 +10,12 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.Channels;
 import java.nio.channels.FileChannel;
+import java.nio.channels.FileLock;
+import java.nio.channels.OverlappingFileLockException;
 import java.nio.charset.Charset;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Paths;
+import java.time.Instant;
 import java.util.Objects;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
@@ -20,6 +23,7 @@ import java.util.function.Predicate;
 import com.example.QueueService;
 import com.example.exception.DeletionFailed;
 import com.example.exception.InvalidMessageBodyContent;
+import com.example.exception.LockTimeoutException;
 import com.example.exception.UnableToAccessUnderlyingStore;
 import com.example.model.Messages;
 import com.example.model.impl.SimpleMessage;
@@ -46,6 +50,8 @@ public class FileQueueService implements QueueService<SimpleMessage> {
 
     private final long visibilityTimeout;
 
+    private final long lockTimeout;
+
     private final SimpleMessageMapper mapper = new SimpleMessageMapper();
 
     /**
@@ -59,11 +65,13 @@ public class FileQueueService implements QueueService<SimpleMessage> {
     public FileQueueService(final long visibilityTimeout,
                             final String storagePath,
                             final String fileFormat,
-                            final String inProgressFileSuffix) {
+                            final String inProgressFileSuffix,
+                            final long lockTimeout) {
         this.storagePath = storagePath;
         this.fileFormat = fileFormat;
         this.inProgressFileSuffix = inProgressFileSuffix;
         this.visibilityTimeout = visibilityTimeout;
+        this.lockTimeout = lockTimeout;
     }
 
     /**
@@ -72,13 +80,16 @@ public class FileQueueService implements QueueService<SimpleMessage> {
      *
      * @param queue   to push message to
      * @param message string body of a message
+     * @throws DeletionFailed            if for some reasons service cannot delete specified message
+     * @throws LockTimeoutException      if service weren't able to acquire lock by specified timeout
+     * @throws InvalidMessageBodyContent if non allowed symbols were found in message string
      */
     @Override
     public void push(String queue, String message) {
         validateMessage(message);
         final SimpleMessage messageObject = Messages.createMessage(message);
         try (FileChannel queueChannel = FileChannel.open(Paths.get(getFileName(queue)), APPEND, CREATE)) {
-            queueChannel.lock();
+            tryLock(queueChannel);
             push(queueChannel, messageObject);
         } catch (IOException e) {
             throw new UnableToAccessUnderlyingStore(e.getMessage(), e);
@@ -91,14 +102,16 @@ public class FileQueueService implements QueueService<SimpleMessage> {
      *
      * @param queue to pull message from
      * @return {@link SimpleMessage}
+     * @throws DeletionFailed       if for some reasons service cannot delete specified message
+     * @throws LockTimeoutException if service weren't able to acquire lock by specified timeout
      */
     @Override
     public SimpleMessage pull(String queue) {
         try (FileChannel queueChannel = FileChannel.open(Paths.get(getFileName(queue)), READ, WRITE);
              FileChannel inProgressQueueChannel = FileChannel
                      .open(Paths.get(getInProgressFileName(queue)), READ, WRITE, CREATE)) {
-            queueChannel.lock();
-            inProgressQueueChannel.lock();
+            tryLock(queueChannel);
+            tryLock(inProgressQueueChannel);
             final SimpleMessage inProgress = pollIf(inProgressQueueChannel,
                                                     message -> Messages.isExpired(message, visibilityTimeout),
                                                     message -> push(inProgressQueueChannel,
@@ -126,11 +139,13 @@ public class FileQueueService implements QueueService<SimpleMessage> {
      *
      * @param queue   to delete messages from
      * @param message to delete
+     * @throws DeletionFailed       if for some reasons service cannot delete specified message
+     * @throws LockTimeoutException if service weren't able to acquire lock by specified timeout
      */
     @Override
     public void delete(final String queue, final SimpleMessage message) {
         try (FileChannel inProgressChannel = FileChannel.open(Paths.get(getInProgressFileName(queue)), READ, WRITE)) {
-            inProgressChannel.lock();
+            tryLock(inProgressChannel);
             deleteIf(inProgressChannel, line -> {
                 final SimpleMessage mapped = mapper.toMessage(line);
                 return Objects.equals(message.getId(), mapped.getId());
@@ -197,6 +212,21 @@ public class FileQueueService implements QueueService<SimpleMessage> {
         } while (Objects.nonNull(currentLine) && !predicate.test(currentLine));
         if (Objects.nonNull(currentLine)) {
             compact(channel, readBytes - (currentLine.length() + System.lineSeparator().length()), readBytes);
+        }
+    }
+
+    private void tryLock(final FileChannel channel) throws IOException {
+        FileLock lock = null;
+        Instant lockRelease = Instant.now().plusMillis(lockTimeout);
+        while (Objects.isNull(lock)) {
+            try {
+                lock = channel.tryLock();
+            } catch (OverlappingFileLockException e) {
+                //Have to try to lock file again
+            }
+            if (Instant.now().isAfter(lockRelease)) {
+                throw new LockTimeoutException("Unable to acquire file lock.");
+            }
         }
     }
 

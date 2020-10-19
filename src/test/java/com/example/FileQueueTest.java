@@ -32,7 +32,7 @@ import org.junit.jupiter.api.Test;
 class FileQueueTest {
 
     //Default storage at the root of a project
-    private final String storage = "";
+    private final String storage = "D:\\delete\\";
 
     private final String fileFormat = ".queue";
 
@@ -44,10 +44,12 @@ class FileQueueTest {
 
     private long visibilityTimeout = 500;
 
+    private long lockTimeout = 10_000;
+
     @BeforeEach
     void setUp() {
         queue = UUID.randomUUID().toString();
-        queueService = new FileQueueService(visibilityTimeout, storage, fileFormat, inProgressSuffix);
+        queueService = new FileQueueService(visibilityTimeout, storage, fileFormat, inProgressSuffix, lockTimeout);
     }
 
     @AfterEach
